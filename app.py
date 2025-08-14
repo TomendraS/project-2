@@ -1620,6 +1620,8 @@ if pdf:
         except Exception as tabula_error:
             print(f"❌ Tabula extraction failed for uploaded PDF: {tabula_error}")
             tables = []
+    except Exception as e:
+        print(f"❌ Error processing uploaded PDF: {e}")
 
             if not tables:
                 print("⚠️ No tables found in uploaded PDF")
