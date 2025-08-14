@@ -123,3 +123,49 @@ async def process_pdf(file_path: str, output_dir: str = None) -> list:
 
     print(f"🎯 Completed PDF processing for {file_path}, {len(generated_csvs)} CSV(s) created")
     return generated_csvs
+
+# ------------------------------
+# New functions for app.py usage
+# ------------------------------
+async def process_uploaded_pdf(pdf_file, created_files: set) -> list:
+    """Handle direct uploaded PDF file and return table data info list."""
+    print("📄 Processing uploaded PDF file...")
+    temp_pdf_filename = f"uploaded_{pdf_file.filename}" if pdf_file.filename else "uploaded_file.pdf"
+    with open(temp_pdf_filename, "wb") as f:
+        f.write(await pdf_file.read())
+    created_files.add(os.path.normpath(temp_pdf_filename))
+
+    csv_files = await process_pdf(temp_pdf_filename)
+    table_infos = []
+    for csv_path in csv_files:
+        df = pd.read_csv(csv_path)
+        table_infos.append({
+            "filename": csv_path,
+            "source_pdf": temp_pdf_filename,
+            "shape": df.shape,
+            "columns": list(df.columns),
+            "sample_data": df.head(3).to_dict("records"),
+            "description": f"Extracted table from uploaded PDF: {pdf_file.filename}",
+            "source": "uploaded_pdf"
+        })
+    return table_infos
+
+async def process_extracted_pdfs(pdf_file_paths: list, created_files: set) -> list:
+    """Handle PDFs extracted from archives and return table data info list."""
+    extracted_infos = []
+    for i, pdf_path in enumerate(pdf_file_paths, start=1):
+        print(f"📄 Processing extracted PDF {i}/{len(pdf_file_paths)}: {os.path.basename(pdf_path)}")
+        csv_files = await process_pdf(pdf_path)
+        for csv_path in csv_files:
+            df = pd.read_csv(csv_path)
+            extracted_infos.append({
+                "filename": csv_path,
+                "source_pdf": pdf_path,
+                "shape": df.shape,
+                "columns": list(df.columns),
+                "sample_data": df.head(3).to_dict("records"),
+                "description": f"Extracted table from archive PDF: {os.path.basename(pdf_path)}",
+                "source": "archive_extraction"
+            })
+            created_files.add(os.path.normpath(csv_path))
+    return extracted_infos
