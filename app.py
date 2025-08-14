@@ -26,8 +26,6 @@ import zipfile
 import tempfile
 import shutil
 import os
-import pdfplumber
-
 
 app = FastAPI()
 load_dotenv()
@@ -45,17 +43,6 @@ def _snapshot_files(root: str = ".") -> set[str]:
             rel = os.path.normpath(os.path.join(os.path.relpath(dirpath, root), fn))
             files.add(rel)
     return files
-
-def extract_text_from_pdf(file_path):
-    """Extract plain text from a PDF file."""
-    text = ""
-    with pdfplumber.open(file_path) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-    return text
-
 
 def _cleanup_created_files(files_to_delete: set[str]) -> int:
     """Delete specific files created during this request.
@@ -758,6 +745,7 @@ async def process_pdf_files() -> list:
             
             # Extract all tables from PDF using tabula
             try:
+                # Extract tables with various configurations to catch different table formats
                 tables = tabula.read_pdf(
                     pdf_file, 
                     pages='all', 
@@ -767,6 +755,7 @@ async def process_pdf_files() -> list:
                     silent=True
                 )
                 
+                # If lattice method didn't work well, try stream method
                 if not tables or all(df.empty for df in tables):
                     print("📄 Retrying with stream method...")
                     tables = tabula.read_pdf(
@@ -788,6 +777,7 @@ async def process_pdf_files() -> list:
             
             print(f"📊 Found {len(tables)} raw tables in {pdf_file}")
             
+            # Store all raw tables with metadata (NO PROCESSING)
             for j, raw_df in enumerate(tables):
                 if raw_df.empty:
                     print(f"⚠️ Table {j+1} is empty, skipping")
@@ -823,6 +813,7 @@ async def process_pdf_files() -> list:
         print(f"\n🔍 Analyzing table from {table_meta['source_pdf']} (table {table_meta['table_number']})")
         print(f"   📋 Columns: {columns}")
         
+        # Find existing group with matching headers
         found_group = None
         for group_key, group_data in combined_data_groups.items():
             print(f"   🔄 Comparing with group '{group_key}':")
@@ -831,9 +822,11 @@ async def process_pdf_files() -> list:
                 break
         
         if found_group:
+            # Add to existing group
             combined_data_groups[found_group]["raw_tables"].append(table_meta)
             print(f"   ➕ Added to existing group '{found_group}' (now {len(combined_data_groups[found_group]['raw_tables'])} tables)")
         else:
+            # Create new group
             group_name = f"table_group_{len(combined_data_groups) + 1}"
             combined_data_groups[group_name] = {
                 "reference_columns": columns,
@@ -847,7 +840,7 @@ async def process_pdf_files() -> list:
         for table in group_data['raw_tables']:
             print(f"      - {table['source_pdf']} (table {table['table_number']})")
     
-    # Third pass: Merge tables and save
+    # Third pass: Simply merge tables and save (NO data_scrape processing)
     print("\n🔄 Phase 3: Merging grouped tables and saving...")
     
     for group_name, group_data in combined_data_groups.items():
@@ -856,16 +849,19 @@ async def process_pdf_files() -> list:
         
         print(f"\n🔗 Processing group '{group_name}' with {len(raw_tables_in_group)} table(s)...")
         
+        # Merge all raw tables in this group
         combined_raw_dfs = []
         source_pdfs = []
         
         for table_meta in raw_tables_in_group:
-            raw_df = table_meta["raw_dataframe"].copy()
+            raw_df = table_meta["raw_dataframe"].copy()  # Make a copy to avoid modifying original
             
+            # Ensure column names match the reference
             if list(raw_df.columns) != reference_columns:
                 print(f"   🔧 Standardizing columns for {table_meta['source_pdf']}")
                 raw_df.columns = reference_columns
             
+            # Add source tracking
             raw_df['source_pdf'] = table_meta["source_pdf"]
             raw_df['table_number'] = table_meta["table_number"]
             
@@ -873,19 +869,24 @@ async def process_pdf_files() -> list:
             source_pdfs.append(table_meta["source_pdf"])
             print(f"   ✅ Added {raw_df.shape[0]} rows from {table_meta['source_pdf']}")
         
+        # Combine all raw DataFrames
         try:
             print(f"   🔗 Merging {len(combined_raw_dfs)} raw tables...")
             merged_df = pd.concat(combined_raw_dfs, ignore_index=True)
             print(f"   ✅ Merged into single table: {merged_df.shape[0]} rows, {merged_df.shape[1]} cols")
             
+            # Create a meaningful filename
             if len(combined_data_groups) == 1:
+                # Only one type of table across all PDFs
                 csv_filename = "combined_tables.csv"
             else:
+                # Multiple different table types
                 first_col = reference_columns[0] if reference_columns else "data"
                 clean_name = re.sub(r'[^\w\s-]', '', str(first_col)).strip()
                 clean_name = re.sub(r'[-\s]+', '_', clean_name)
                 csv_filename = f"combined_{clean_name[:20]}.csv"
             
+            # Save the merged data directly (no processing)
             merged_df.to_csv(csv_filename, index=False, encoding="utf-8")
             
             table_info = {
@@ -901,9 +902,12 @@ async def process_pdf_files() -> list:
             
             pdf_data.append(table_info)
             print(f"   💾 Saved merged table as {csv_filename}")
-        
+            print(f"   📊 Final: {merged_df.shape[0]} rows, {merged_df.shape[1]} columns")
+            print(f"   📋 Sources: {', '.join(set(source_pdfs))}")
+            
         except Exception as merge_error:
             print(f"❌ Error merging group {group_name}: {merge_error}")
+            # Fallback: save individual tables
             for idx, table_meta in enumerate(raw_tables_in_group):
                 raw_df = table_meta["raw_dataframe"]
                 csv_filename = f"fallback_{group_name}_table_{idx+1}.csv"
@@ -1551,38 +1555,24 @@ async def aianalyst(request: Request):
         except Exception as e:
             print(f"❌ Error processing extracted JSON {json_file_path}: {e}")
 
-# Step 3.5: Handle provided PDF file
-uploaded_pdf_data = []
-if pdf:
-    try:
-        print("📄 Processing uploaded PDF file...")
-        pdf_content = await pdf.read()
-        
-        # Save uploaded PDF temporarily
-        temp_pdf_filename = f"uploaded_{pdf.filename}" if pdf.filename else "uploaded_file.pdf"
-        with open(temp_pdf_filename, "wb") as f:
-            f.write(pdf_content)
-        created_files.add(os.path.normpath(temp_pdf_filename))                                                                                            
-        
-        print(f"📄 Saved uploaded PDF as {temp_pdf_filename}")
-        
-        # ✅ Extract plain text from PDF (for text-only PDFs)
+    # Step 3.5: Handle provided PDF file
+    uploaded_pdf_data = []
+    if pdf:
         try:
-            with pdfplumber.open(temp_pdf_filename) as pdf_doc:
-                extracted_text = ""
-                for page in pdf_doc.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        extracted_text += page_text + "\n"
-            if extracted_text.strip():
-                question_text += f"\n\nExtracted from PDF ({pdf.filename}):\n{extracted_text}"
-                print(f"✅ Added plain text from PDF {pdf.filename} to question_text")
-        except Exception as e:
-            print(f"⚠️ Could not extract plain text from PDF {pdf.filename}: {e}")
+            print("📄 Processing uploaded PDF file...")
+            pdf_content = await pdf.read()
+            
+            # Save uploaded PDF temporarily
+            temp_pdf_filename = f"uploaded_{pdf.filename}" if pdf.filename else "uploaded_file.pdf"
+            with open(temp_pdf_filename, "wb") as f:
+                f.write(pdf_content)
+            created_files.add(os.path.normpath(temp_pdf_filename))                                                                                            
+            
+            print(f"📄 Saved uploaded PDF as {temp_pdf_filename}")
 
-        # Extract tables (raw) then group & merge by header before any CSV creation
-        try:
-            tables = tabula.read_pdf(
+            # Extract tables (raw) then group & merge by header before any CSV creation
+            try:
+                tables = tabula.read_pdf(
                 temp_pdf_filename,
                 pages='all',
                 multiple_tables=True,
@@ -1590,16 +1580,19 @@ if pdf:
                 lattice=True,
                 silent=True
             )
-            if not tables or all(df.empty for df in tables):
-                print("📄 Retrying with stream method...")
-                tables = tabula.read_pdf(
-                    temp_pdf_filename,
-                    pages='all',
-                    multiple_tables=True,
-                    pandas_options={'header': 'infer'},
-                    stream=True,
-                    silent=True
-                )
+                if not tables or all(df.empty for df in tables):
+                    print("📄 Retrying with stream method...")
+                    tables = tabula.read_pdf(
+                        temp_pdf_filename,
+                        pages='all',
+                        multiple_tables=True,
+                        pandas_options={'header': 'infer'},
+                        stream=True,
+                        silent=True
+                    )
+            except Exception as tabula_error:
+                print(f"❌ Tabula extraction failed for uploaded PDF: {tabula_error}")
+                tables = []
 
             if not tables:
                 print("⚠️ No tables found in uploaded PDF")
@@ -1656,7 +1649,7 @@ if pdf:
                     cleaned_df.to_csv(csv_filename, index=False, encoding="utf-8")
                     created_files.add(os.path.normpath(csv_filename))
                     table_info = {
-                        "filename": csv_filename,
+                        "filename": csv_filename,  # Add this
                         "source_pdf": temp_pdf_filename,
                         "table_number": g_idx,
                         "merged_from_tables": [t["table_number"] for t in grp["tables"]],
@@ -1672,96 +1665,77 @@ if pdf:
         except Exception as e:
             print(f"❌ Error processing uploaded PDF: {e}")
 
-    except Exception as e:
-        print(f"❌ Error handling uploaded PDF: {e}")
-
-
-# Process extracted PDF files from archives
-extracted_pdf_data = []
-for i, pdf_file_path in enumerate(extracted_from_archives['pdf_files']):
-    try:
-        print(f"📄 Processing extracted PDF {i+1}: {os.path.basename(pdf_file_path)}")
-
-        # ✅ Extract plain text from PDF (optional but useful)
+    # Process extracted PDF files from archives
+    extracted_pdf_data = []
+    for i, pdf_file_path in enumerate(extracted_from_archives['pdf_files']):
         try:
-            with pdfplumber.open(pdf_file_path) as pdf_doc:
-                extracted_text = ""
-                for page in pdf_doc.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        extracted_text += page_text + "\n"
-            if extracted_text.strip():
-                question_text += f"\n\nExtracted from archive PDF ({os.path.basename(pdf_file_path)}):\n{extracted_text}"
-                print(f"✅ Added plain text from archive PDF {os.path.basename(pdf_file_path)} to question_text")
-        except Exception as e:
-            print(f"⚠️ Could not extract plain text from archive PDF {os.path.basename(pdf_file_path)}: {e}")
-
-        # Extract tables from the PDF
-        try:
-            tables = tabula.read_pdf(
-                pdf_file_path,
-                pages='all',
-                multiple_tables=True,
-                pandas_options={'header': 'infer'},
-                lattice=True,
-                silent=True
-            )
-            if not tables or all(df.empty for df in tables):
-                print(f"📄 Retrying with stream method for {os.path.basename(pdf_file_path)}...")
+            print(f"📄 Processing extracted PDF {i+1}: {os.path.basename(pdf_file_path)}")
+            
+            # Extract tables from the PDF
+            try:
                 tables = tabula.read_pdf(
                     pdf_file_path,
                     pages='all',
                     multiple_tables=True,
                     pandas_options={'header': 'infer'},
-                    stream=True,
+                    lattice=True,
                     silent=True
                 )
-        except Exception as tabula_error:
-            print(f"❌ Tabula extraction failed for {pdf_file_path}: {tabula_error}")
-            tables = []
+                if not tables or all(df.empty for df in tables):
+                    print(f"📄 Retrying with stream method for {os.path.basename(pdf_file_path)}...")
+                    tables = tabula.read_pdf(
+                        pdf_file_path,
+                        pages='all',
+                        multiple_tables=True,
+                        pandas_options={'header': 'infer'},
+                        stream=True,
+                        silent=True
+                    )
+            except Exception as tabula_error:
+                print(f"❌ Tabula extraction failed for {pdf_file_path}: {tabula_error}")
+                tables = []
 
-        if not tables:
-            print(f"⚠️ No tables found in extracted PDF {os.path.basename(pdf_file_path)}")
-            continue
-
-        print(f"📊 Found {len(tables)} raw tables in extracted PDF – processing...")
-
-        # Group tables by similar headers (simplified version)
-        base_name = os.path.splitext(os.path.basename(pdf_file_path))[0]
-        sourcer = data_scrape.ImprovedWebScraper()
-
-        for j, raw_df in enumerate(tables):
-            if raw_df.empty:
+            if not tables:
+                print(f"⚠️ No tables found in extracted PDF {os.path.basename(pdf_file_path)}")
                 continue
+                
+            print(f"📊 Found {len(tables)} raw tables in extracted PDF – processing...")
+            
+            # Group tables by similar headers (simplified version)
+            base_name = os.path.splitext(os.path.basename(pdf_file_path))[0]
+            sourcer = data_scrape.ImprovedWebScraper()
+            
+            for j, raw_df in enumerate(tables):
+                if raw_df.empty:
+                    continue
+                    
+                try:
+                    cleaned_df, formatting_results = await sourcer.numeric_formatter.format_dataframe_numerics(raw_df)
+                except Exception as fmt_err:
+                    print(f"⚠️ Numeric formatting failed for table {j+1}: {fmt_err}; using raw data")
+                    cleaned_df = raw_df
+                    formatting_results = {}
 
-            try:
-                cleaned_df, formatting_results = await sourcer.numeric_formatter.format_dataframe_numerics(raw_df)
-            except Exception as fmt_err:
-                print(f"⚠️ Numeric formatting failed for table {j+1}: {fmt_err}; using raw data")
-                cleaned_df = raw_df
-                formatting_results = {}
+                csv_filename = f"ExtractedPDF_{i+1}_table_{j+1}.csv"
+                cleaned_df.to_csv(csv_filename, index=False, encoding="utf-8")
+                created_files.add(os.path.normpath(csv_filename))
 
-            csv_filename = f"ExtractedPDF_{i+1}_table_{j+1}.csv"
-            cleaned_df.to_csv(csv_filename, index=False, encoding="utf-8")
-            created_files.add(os.path.normpath(csv_filename))
-
-            table_info = {
-                "filename": csv_filename,
-                "source_pdf": pdf_file_path,
-                "table_number": j + 1,
-                "shape": cleaned_df.shape,
-                "columns": list(cleaned_df.columns),
-                "sample_data": cleaned_df.head(3).to_dict('records'),
-                "description": f"Table extracted from archive PDF: {os.path.basename(pdf_file_path)} (table {j+1})",
-                "formatting_applied": formatting_results,
-                "source": "archive_extraction"
-            }
-            extracted_pdf_data.append(table_info)
-            print(f"💾 Saved extracted PDF table as {csv_filename}")
-
-    except Exception as e:
-        print(f"❌ Error processing extracted PDF {pdf_file_path}: {e}")
-
+                table_info = {
+                    "filename": csv_filename,
+                    "source_pdf": pdf_file_path,
+                    "table_number": j + 1,
+                    "shape": cleaned_df.shape,
+                    "columns": list(cleaned_df.columns),
+                    "sample_data": cleaned_df.head(3).to_dict('records'),
+                    "description": f"Table extracted from archive PDF: {os.path.basename(pdf_file_path)} (table {j+1})",
+                    "formatting_applied": formatting_results,
+                    "source": "archive_extraction"
+                }
+                extracted_pdf_data.append(table_info)
+                print(f"💾 Saved extracted PDF table as {csv_filename}")
+                
+        except Exception as e:
+            print(f"❌ Error processing extracted PDF {pdf_file_path}: {e}")
 
     # Step 4: Extract all URLs and database files from question
     print("🔍 Extracting all data sources from question...")
