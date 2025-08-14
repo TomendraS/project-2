@@ -758,7 +758,6 @@ async def process_pdf_files() -> list:
             
             # Extract all tables from PDF using tabula
             try:
-                # Extract tables with various configurations to catch different table formats
                 tables = tabula.read_pdf(
                     pdf_file, 
                     pages='all', 
@@ -768,7 +767,6 @@ async def process_pdf_files() -> list:
                     silent=True
                 )
                 
-                # If lattice method didn't work well, try stream method
                 if not tables or all(df.empty for df in tables):
                     print("📄 Retrying with stream method...")
                     tables = tabula.read_pdf(
@@ -790,7 +788,6 @@ async def process_pdf_files() -> list:
             
             print(f"📊 Found {len(tables)} raw tables in {pdf_file}")
             
-            # Store all raw tables with metadata (NO PROCESSING)
             for j, raw_df in enumerate(tables):
                 if raw_df.empty:
                     print(f"⚠️ Table {j+1} is empty, skipping")
@@ -826,7 +823,6 @@ async def process_pdf_files() -> list:
         print(f"\n🔍 Analyzing table from {table_meta['source_pdf']} (table {table_meta['table_number']})")
         print(f"   📋 Columns: {columns}")
         
-        # Find existing group with matching headers
         found_group = None
         for group_key, group_data in combined_data_groups.items():
             print(f"   🔄 Comparing with group '{group_key}':")
@@ -835,11 +831,9 @@ async def process_pdf_files() -> list:
                 break
         
         if found_group:
-            # Add to existing group
             combined_data_groups[found_group]["raw_tables"].append(table_meta)
             print(f"   ➕ Added to existing group '{found_group}' (now {len(combined_data_groups[found_group]['raw_tables'])} tables)")
         else:
-            # Create new group
             group_name = f"table_group_{len(combined_data_groups) + 1}"
             combined_data_groups[group_name] = {
                 "reference_columns": columns,
@@ -853,7 +847,7 @@ async def process_pdf_files() -> list:
         for table in group_data['raw_tables']:
             print(f"      - {table['source_pdf']} (table {table['table_number']})")
     
-    # Third pass: Simply merge tables and save (NO data_scrape processing)
+    # Third pass: Merge tables and save
     print("\n🔄 Phase 3: Merging grouped tables and saving...")
     
     for group_name, group_data in combined_data_groups.items():
@@ -862,19 +856,16 @@ async def process_pdf_files() -> list:
         
         print(f"\n🔗 Processing group '{group_name}' with {len(raw_tables_in_group)} table(s)...")
         
-        # Merge all raw tables in this group
         combined_raw_dfs = []
         source_pdfs = []
         
         for table_meta in raw_tables_in_group:
-            raw_df = table_meta["raw_dataframe"].copy()  # Make a copy to avoid modifying original
+            raw_df = table_meta["raw_dataframe"].copy()
             
-            # Ensure column names match the reference
             if list(raw_df.columns) != reference_columns:
                 print(f"   🔧 Standardizing columns for {table_meta['source_pdf']}")
                 raw_df.columns = reference_columns
             
-            # Add source tracking
             raw_df['source_pdf'] = table_meta["source_pdf"]
             raw_df['table_number'] = table_meta["table_number"]
             
@@ -882,24 +873,19 @@ async def process_pdf_files() -> list:
             source_pdfs.append(table_meta["source_pdf"])
             print(f"   ✅ Added {raw_df.shape[0]} rows from {table_meta['source_pdf']}")
         
-        # Combine all raw DataFrames
         try:
             print(f"   🔗 Merging {len(combined_raw_dfs)} raw tables...")
             merged_df = pd.concat(combined_raw_dfs, ignore_index=True)
             print(f"   ✅ Merged into single table: {merged_df.shape[0]} rows, {merged_df.shape[1]} cols")
             
-            # Create a meaningful filename
             if len(combined_data_groups) == 1:
-                # Only one type of table across all PDFs
                 csv_filename = "combined_tables.csv"
             else:
-                # Multiple different table types
                 first_col = reference_columns[0] if reference_columns else "data"
                 clean_name = re.sub(r'[^\w\s-]', '', str(first_col)).strip()
                 clean_name = re.sub(r'[-\s]+', '_', clean_name)
                 csv_filename = f"combined_{clean_name[:20]}.csv"
             
-            # Save the merged data directly (no processing)
             merged_df.to_csv(csv_filename, index=False, encoding="utf-8")
             
             table_info = {
@@ -915,12 +901,9 @@ async def process_pdf_files() -> list:
             
             pdf_data.append(table_info)
             print(f"   💾 Saved merged table as {csv_filename}")
-            print(f"   📊 Final: {merged_df.shape[0]} rows, {merged_df.shape[1]} columns")
-            print(f"   📋 Sources: {', '.join(set(source_pdfs))}")
-            
+        
         except Exception as merge_error:
             print(f"❌ Error merging group {group_name}: {merge_error}")
-            # Fallback: save individual tables
             for idx, table_meta in enumerate(raw_tables_in_group):
                 raw_df = table_meta["raw_dataframe"]
                 csv_filename = f"fallback_{group_name}_table_{idx+1}.csv"
