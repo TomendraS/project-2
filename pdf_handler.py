@@ -1,78 +1,31 @@
-# pdf_handler.py
 import os
 import re
-import aiohttp
 import tempfile
-import pdfplumber
 import tabula
 import pandas as pd
-from bs4 import BeautifulSoup
+import pdfplumber
+from fastapi import UploadFile
 
 def columns_match(cols1, cols2):
+    """Compare two header lists ignoring case and whitespace."""
     return [str(c).strip().lower() for c in cols1] == [str(c).strip().lower() for c in cols2]
 
-async def download_pdf_from_url(url: str, output_dir: str = None) -> str:
-    """Download PDF from URL and return local file path."""
-    if output_dir is None:
-        output_dir = tempfile.gettempdir()
-
-    filename = os.path.basename(url.split("?")[0]) or "downloaded.pdf"
-    file_path = os.path.join(output_dir, filename)
-
-    print(f"📥 Downloading PDF from {url}...")
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                raise Exception(f"Failed to download PDF from {url}, status: {resp.status}")
-            content = await resp.read()
-            with open(file_path, "wb") as f:
-                f.write(content)
-    print(f"✅ Downloaded PDF → {file_path}")
-    return file_path
-
-async def find_pdf_links_on_webpage(url: str) -> list:
-    """Find all PDF links on a webpage."""
-    print(f"🔍 Searching for PDF links on {url}...")
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                raise Exception(f"Failed to fetch page {url}, status: {resp.status}")
-            html_content = await resp.text()
-
-    soup = BeautifulSoup(html_content, "html.parser")
-    pdf_links = []
-    for link in soup.find_all("a", href=True):
-        href = link["href"]
-        if ".pdf" in href.lower():
-            if href.startswith("http"):
-                pdf_links.append(href)
-            else:
-                base = url.rstrip("/")
-                pdf_links.append(base + "/" + href.lstrip("/"))
-
-    print(f"📑 Found {len(pdf_links)} PDF link(s) on {url}")
-    return list(set(pdf_links))
-
-async def process_pdf(file_path: str, output_dir: str = None) -> list:
+async def process_pdf(file_path: str) -> list:
     """
-    Extract tables from a PDF file, group by header, save as CSV.
-    Returns list of generated CSV file paths.
+    Process a PDF file → extract tables, group by header, save to CSV.
+    Returns a list of generated CSV file paths.
     """
-    if output_dir is None:
-        output_dir = tempfile.gettempdir()
+    print(f"📄 Starting PDF processing: {file_path}")
 
-    print(f"📄 Starting PDF processing → {file_path}")
-
-    # Step 1: Try extracting text (optional)
+    # Try extracting text (optional for debugging/LLM context)
     try:
         with pdfplumber.open(file_path) as pdf_doc:
             text = "\n".join([page.extract_text() or "" for page in pdf_doc.pages])
-        print(f"📝 Extracted text from {file_path} ({len(text)} characters)")
+        print(f"📝 Extracted {len(text)} characters of plain text")
     except Exception as e:
-        print(f"⚠️ Could not extract plain text: {e}")
+        print(f"⚠️ Text extraction failed: {e}")
 
-    # Step 2: Extract tables
-    print(f"📊 Extracting tables from {file_path}...")
+    # Extract tables
     try:
         tables = tabula.read_pdf(
             file_path,
@@ -83,7 +36,7 @@ async def process_pdf(file_path: str, output_dir: str = None) -> list:
             silent=True
         )
         if not tables or all(df.empty for df in tables):
-            print("🔄 Lattice method found no tables, retrying with stream method...")
+            print("🔄 Retrying with stream mode...")
             tables = tabula.read_pdf(
                 file_path,
                 pages='all',
@@ -93,16 +46,16 @@ async def process_pdf(file_path: str, output_dir: str = None) -> list:
                 silent=True
             )
     except Exception as e:
-        print(f"❌ Table extraction failed for {file_path}: {e}")
+        print(f"❌ Table extraction failed: {e}")
         return []
 
     if not tables or all(df.empty for df in tables):
-        print(f"⚠️ No tables found in {file_path}")
+        print("⚠️ No tables found in PDF")
         return []
 
-    print(f"✅ Extracted {len(tables)} table(s) from {file_path}")
+    print(f"✅ Found {len(tables)} table(s) in {os.path.basename(file_path)}")
 
-    # Step 3: Filter and group by header
+    # Group tables by header
     raw_tables = []
     for idx, df in enumerate(tables):
         if df.empty:
@@ -120,23 +73,43 @@ async def process_pdf(file_path: str, output_dir: str = None) -> list:
                 break
         if not placed:
             groups.append({"reference_columns": tbl["columns"], "tables": [tbl]})
-    print(f"📦 Grouped into {len(groups)} table group(s) by matching headers")
+    print(f"📦 Grouped into {len(groups)} group(s) by header")
 
-    # Step 4: Merge & save as CSV
+    # Merge and save CSVs
     generated_csvs = []
     base_name = os.path.splitext(os.path.basename(file_path))[0]
     for g_idx, grp in enumerate(groups, start=1):
         merged_df = pd.concat([t["dataframe"].copy() for t in grp["tables"]], ignore_index=True)
         if len(groups) == 1:
-            csv_filename = os.path.join(output_dir, f"{base_name}.csv")
+            csv_filename = f"{base_name}.csv"
         else:
             first_col = grp["reference_columns"][0] if grp["reference_columns"] else f"group_{g_idx}"
             safe_part = re.sub(r'[^A-Za-z0-9_]+', '_', str(first_col))[:20]
-            csv_filename = os.path.join(output_dir, f"{base_name}_{safe_part or 'group'}_{g_idx}.csv")
+            csv_filename = f"{base_name}_{safe_part or 'group'}_{g_idx}.csv"
 
         merged_df.to_csv(csv_filename, index=False, encoding="utf-8")
         generated_csvs.append(csv_filename)
         print(f"💾 Saved group {g_idx} → {csv_filename}")
 
-    print(f"🎯 Completed PDF processing for {file_path}, {len(generated_csvs)} CSV(s) created")
     return generated_csvs
+
+
+async def process_uploaded_pdf(pdf: UploadFile, created_files: set) -> list:
+    """Handle directly uploaded PDF."""
+    temp_pdf_path = f"uploaded_{pdf.filename}" if pdf.filename else "uploaded_file.pdf"
+    with open(temp_pdf_path, "wb") as f:
+        f.write(await pdf.read())
+    created_files.add(os.path.normpath(temp_pdf_path))
+    csv_paths = await process_pdf(temp_pdf_path)
+    return [{"filename": path, "source_pdf": temp_pdf_path} for path in csv_paths]
+
+
+async def process_extracted_pdfs(pdf_paths: list, created_files: set) -> list:
+    """Handle PDFs extracted from archives."""
+    results = []
+    for pdf_path in pdf_paths:
+        csv_paths = await process_pdf(pdf_path)
+        for path in csv_paths:
+            created_files.add(os.path.normpath(path))
+            results.append({"filename": path, "source_pdf": pdf_path})
+    return results
