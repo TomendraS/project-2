@@ -2844,9 +2844,19 @@ async def aianalyst(request: Request):
             content=fake_answer["choices"][0]["message"]["content"],
             media_type="application/json"
         )
-
+        
     
+    # Ensure raw_code is a string before splitting
+    if isinstance(raw_code, dict):
+        try:
+            raw_code = raw_code["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception:
+            raise ValueError(f"Unexpected Gemini response format: {raw_code}")
+    elif not isinstance(raw_code, str):
+        raw_code = str(raw_code)
+
     lines = raw_code.split('\n')
+
     clean_lines = []
     in_code_block = False
 
