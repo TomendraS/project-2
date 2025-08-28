@@ -15,7 +15,7 @@ import requests
 import time
 
 load_dotenv()
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-pro:generateContent"
 gemini_api = os.getenv("gemini_api")
 gemini_api_2 = os.getenv("gemini_api_2")
 
